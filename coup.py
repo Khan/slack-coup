@@ -22,14 +22,14 @@ class Card(ndb.Model):
     card = ndb.StringProperty()
     eliminated = ndb.BooleanProperty()
 
-    def public_view(self):
+    def view(self, public):
+        card = CARDS[self.card].upper()
         if self.eliminated:
-            return self.private_view()
+            return '~[%s]~' % card
+        elif not public:
+            return '[%s]' % card
         else:
             return '[????]'
-
-    def private_view(self):
-        return '[%s]' % CARDS[self.card].upper()
 
 
 class Player(ndb.Model):
@@ -41,6 +41,10 @@ class Player(ndb.Model):
     @property
     def mention(self):
         return '@' + self.username
+
+    def view(self, public):
+        cards = ' '.join(card.view(public) for card in self.cards)
+        return '%s: %s\u2022 %s' % (self.username, self.money, cards)
 
 
 class GameState(ndb.Model):
@@ -102,12 +106,17 @@ def cancel_game(game):
     }
 
 
-def view_cards(player):
+def view_status(game, response_type):
+    return {
+        'response_type': response_type,
+        'text': '\n'.join(player.view(public=True) for player in game.players)
+    }
+
+
+def view_self(player):
     return {
         'response_type': 'ephemeral',
-        'text': "CARDS: %s\nMONEY: %s" % (
-            " ".join(card.private_view() for card in player.cards),
-            player.money),
+        'text': player.view(public=False),
     }
 
 
@@ -131,6 +140,10 @@ def run_command(game_id, username, args):
         }
     elif args[0] == 'cancel':
         return cancel_game(game)
+    elif args[0] in ('view', 'board'):
+        return view_status(game, 'ephemeral')
+    elif args[0] in ('status', 'state'):
+        return view_status(game, 'in_channel')
 
     # These need a game and a player.
     player = game.get_player(username)
@@ -140,8 +153,8 @@ def run_command(game_id, username, args):
             'text': "You're not in this game!  To start a new game, "
                     "`/coup deal`."
         }
-    elif args[0] in ('cards', 'me', 'look'):
-        return view_cards(player)
+    elif args[0] in ('cards', 'money', 'me', 'look'):
+        return view_self(player)
 
     return {
         "text": "This command is not implemented yet."
