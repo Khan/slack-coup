@@ -2,15 +2,8 @@ import random
 
 from google.appengine.ext import ndb
 
-# dict from full name to short code
-CARDS = {
-
-    'ambassador': 'amba',
-    'assassin': 'assn',
-    'captain': 'capt',
-    'contessa': 'cont',
-    'duke': 'duke',
-}
+# TODO(benkraft): aliases for cards, accept non-lowercase cards everywhere
+CARDS = {'ambassador', 'assassin', 'captain', 'contessa', 'duke'}
 
 
 # dict from alias to canonical name
@@ -81,11 +74,10 @@ class Card(ndb.Model):
     eliminated = ndb.BooleanProperty()
 
     def view(self, public, strike=True):
-        name = CARDS[self.name].upper()
         if self.eliminated and strike:
-            return '~[%s]~' % name
+            return '~[%s]~' % self.name
         elif not public or self.eliminated:
-            return '[%s]' % name
+            return '[%s]' % self.name
         else:
             return '[????]'
 
@@ -96,17 +88,13 @@ class Player(ndb.Model):
     cards = ndb.StructuredProperty(Card, repeated=True)
     money = ndb.IntegerProperty()
 
-    @property
-    def mention(self):
-        return '@' + self.username
-
     def view(self, public):
         if self.is_out():
             cards = ' '.join(card.view(public, False) for card in self.cards)
-            return '~%s: %s~' % (self.username, self.money, cards)
+            return u'~%s: 0\u2022 %s~' % (self.username, cards)
         else:
             cards = ' '.join(card.view(public) for card in self.cards)
-            return '%s: %s\u2022 %s' % (self.username, self.money, cards)
+            return u'%s: %s\u2022 %s' % (self.username, self.money, cards)
 
     def live_cards(self):
         return [card for card in self.cards if not card.eliminated]
@@ -123,8 +111,7 @@ class Player(ndb.Model):
     def remove_card(self, card_name):
         for i, card in enumerate(self.cards):
             if card_name == card.name and not card.eliminated:
-                del self.cards[i]
-                return card
+                return self.cards.pop(i)
         raise ValueError("No such card")
 
     def is_out(self):
@@ -183,9 +170,6 @@ class GameState(ndb.Model):
     def player_usernames(self):
         return [player.username for player in self.players]
 
-    def mention_all(self):
-        return ' '.join(player.mention for player in self.players)
-
     def winner(self):
         remaining_players = self.remaining_players()
         if len(remaining_players) == 1:
@@ -233,26 +217,28 @@ class GameState(ndb.Model):
         else:
             raise ValueError("Unknown status %s" % self.status)
 
-    def status_view(self):
+    def status_view(self, viewer=None):
         lines = [self.status_line()]
         for player in self.players:
-            lines.append(player.view(public=True))
+            lines.append(player.view(public=(viewer != player)))
         return _join_messages(lines)
 
     # After calling any of the following, you must then put() self.
     @staticmethod
-    def create(players):
+    def create(game_id, players):
         cards = [Card(name=name, eliminated=False)
                  for name in CARDS for _ in xrange(3)]
         random.shuffle(cards)
         players = [Player(username=player.lstrip('@'), money=2,
                           cards=[cards.pop(), cards.pop()])
                    for player in players]
-        return GameState(status='READY', unused_cards=cards, players=players)
+        return GameState(id=game_id, status='READY', unused_cards=cards,
+                         players=players)
 
     # ACTIONS
 
     def take_action(self, player, action, target):
+        # TODO(benkraft): don't let you target yourself.
         if player != self.next_player():
             raise Misplay("It's not your turn!  It's %s's turn." %
                           self.next_player().username)
@@ -370,7 +356,8 @@ class GameState(ndb.Model):
         self.unused_cards.append(c)
         random.shuffle(self.unused_cards)
         player.cards.append(self.unused_cards.pop())
-        return "%s drew a new card." % player.username
+        return "%s flipped over a %s and drew a new card." % (
+            player.username, card_name)
 
     # CHALLENGES
 
@@ -388,11 +375,11 @@ class GameState(ndb.Model):
         self.challenger = challenger.username
         challengee = self._challengee()
 
-        text = "%s has challenged %s's %s" % (
+        text = "%s has challenged %s's %s." % (
             challenger.username, challengee.username, verb)
         if challengee.one_card():
             return _join_messages([text, self._resolve_challenge(
-                self, challengee.live_cards()[0])])
+                challengee.live_cards()[0])])
         else:
             return _join_messages(
                 [text, "%s, please flip a card with `/coup show <card>`."
@@ -445,7 +432,6 @@ class GameState(ndb.Model):
     def _resolve_challenge(self, card):
         challengee = self._challengee()
         challenger = self.get_player(self.challenger)
-        text = "%s flipped over a %s." % (challengee.username, card.name)
         flip_card_text = ("%s, please flip a card with `/coup flip <card>`."
                           % challenger.username)
         # TODO(benkraft): refactor to deduplicate?
@@ -455,28 +441,30 @@ class GameState(ndb.Model):
                 redeal_text = self._redeal_card(challengee, card.name)
                 if challenger.one_card():
                     return _join_messages(
-                        [text, redeal_text, self.lose_challenge(
+                        [redeal_text, self.lose_challenge(
                             challenger, challenger.live_cards()[0])])
                 else:
-                    return _join_messages([text, redeal_text, flip_card_text])
+                    return _join_messages([redeal_text, flip_card_text])
             else:
                 failed_text = "The %s failed." % self.last_action
+                flip_text = self._flip_card(challengee, card)
                 self._clear_action()
-                return _join_messages([text, failed_text])
+                return _join_messages([flip_text, failed_text])
         else:  # self.status == 'BLOCK_CHALLENGED'
             if card.name == self.blocked_with:
                 self.status = 'BLOCK_CHALLENGE_LOST'
                 redeal_text = self._redeal_card(challengee, card)
                 if challenger.one_card():
                     return _join_messages(
-                        [text, redeal_text, self.lose_challenge(
+                        [redeal_text, self.lose_challenge(
                             challenger, challenger.live_cards()[0])])
                 else:
-                    return _join_messages([text, redeal_text, flip_card_text])
+                    return _join_messages([redeal_text, flip_card_text])
             else:
                 self.status = 'BLOCK_CHALLENGE_WON'
+                flip_text = self._flip_card(challengee, card)
                 return _join_messages([
-                    text, "The block failed.",
+                    flip_text, "The block failed.",
                     self._maybe_autoresolve_action(block_complete=True)])
 
     # BLOCKS
@@ -502,13 +490,14 @@ class GameState(ndb.Model):
         self.status = 'BLOCKED'
         self.blocker = blocker.username
         self.blocked_with = card_name
-        return "%s has blocked %s's %s with a %s" % (
+        return "%s has blocked %s's %s with a %s." % (
             blocker.username, self.last_player().username,
             self.last_action, card_name)
 
     # AMBASSADOR
 
     def take_cards(self, player):
+        # TODO(benkraft): this might not be true, if the state is READY
         if player != self.last_player():
             raise Misplay("It's not your turn.")
         elif self.last_action != 'exchange':
@@ -522,10 +511,11 @@ class GameState(ndb.Model):
         card1 = self.unused_cards.pop()
         card2 = self.unused_cards.pop()
         player.cards.extend([card1, card2])
-        return ("You got a %s and a %s.  To choose which cards to keep, "
-                "`/coup keep <card1> <card2>`." % (card1.name, card2.name))
+        return ("You got a %s and a %s.  To choose which cards to return, "
+                "`/coup return <card1> <card2>`." % (card1.name, card2.name))
 
-    def keep_cards(self, player, card1_name, card2_name):
+    def return_cards(self, player, card1_name, card2_name):
+        # TODO(benkraft): this might not be true, if the state is READY
         if player != self.last_player():
             raise Misplay("It's not your turn.")
         elif self.last_action != 'exchange':

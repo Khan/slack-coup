@@ -12,18 +12,24 @@ def deal_cards(existing_game, game_id, players):
         raise engine.Misplay("There's already a game running in this room!  "
                              "To cancel it and start a new one, "
                              "`/coup restart [usernames]`.")
-    game = engine.GameState.create(players)
+    elif len(players) < 3 or len(players) > 6:
+        raise engine.Misplay("Coup can only be played with 3-6 players.  "
+                             "To start a new game, `/coup deal [usernames]`.")
+    elif len(list(set(players))) != len(players):
+        raise engine.Misplay("The players must be unique.")
+    game = engine.GameState.create(game_id, players)
     game.put()
     return {
         'response_type': 'in_channel',
         'text': "%s, get ready for a game of Coup!  Use `/coup cards` to view "
-                "your cards, and `/coup action <action>` to take an action.  "
-                "@%s, it's your turn." % (game.mention_all(), players[0])
+                "your cards, and `/coup action <action> [target]` to take an "
+                "action.  %s, it's your turn." % (
+                    ' '.join(players), players[0])
     }
 
 
 def cancel_game(game):
-    game.delete()
+    game.key.delete()
     return {
         'response_type': 'in_channel',
         'text': "Game over, everyone loses.  To start a new game, "
@@ -31,41 +37,42 @@ def cancel_game(game):
     }
 
 
-# TODO(benkraft): don't hardcode that it's `/coup`, use whatever it was called
-# with.
-@ndb.transactional
+# TODO(benkraft): here and elsewhere, don't hardcode that it's `/coup`, use
+# whatever it was called with.
 def run_command(game, game_id, username, args):
     if not args:
         # TODO(benkraft): return help
         raise engine.Misplay("What do you want to do?")
     # These don't need an existing game or a player.
-    if args[0] in ('deal', 'new'):
+    if args[0] in ('deal', 'new', 'start'):
         return deal_cards(game, game_id, args[1:])
     elif args[0] == 'restart':
         if game:
             cancel_game(game)
         return deal_cards(None, game_id, args[1:])
 
-    # These need a game, but not a player.
+    # These need a game, but not necessarily a player.
     if not game:
         raise engine.Misplay("There's no game running in this channel.  "
                              "To start a new game, `/coup deal`.")
     elif args[0] == 'cancel':
         return cancel_game(game)
-    elif args[0] in ('view', 'board'):
-        return {
-            'response_type': 'ephemeral',
-            'text': game.status_view(),
-        }
     elif args[0] in ('status', 'state'):
         return {
             'response_type': 'in_channel',
             'text': game.status_view(),
         }
 
-    # These need a game and a player.
+    # This can take a player, but doesn't need one.
     # TODO: fake being another user for testing
     player = game.get_player(username)
+    if args[0] in ('view', 'board'):
+        return {
+            'response_type': 'ephemeral',
+            'text': game.status_view(player),
+        }
+
+    # These need a game and a player.
     if not player:
         raise engine.Misplay("You're not in this game!  To start a new game, "
                              "`/coup deal`.")
@@ -94,13 +101,13 @@ def run_command(game, game_id, username, args):
             'response_type': 'ephemeral',
             'text': game.take_cards(player),
         }
-    elif args[0] == 'keep':
+    elif args[0] == 'return':
         if len(args) != 3:
             raise engine.Misplay("To complete an exchange, "
-                                 "`/coup keep <card1> <card2>`.")
+                                 "`/coup return <card1> <card2>`.")
         return {
             'response_type': 'ephemeral',
-            'text': game.keep_cards(player, args[1], args[2]),
+            'text': game.return_cards(player, args[1], args[2]),
         }
     elif args[0] in ('challenge', 'bullshit'):
         return {
@@ -141,14 +148,22 @@ def run_command(game, game_id, username, args):
             'text': game.lose_card(player, args[1]),
         }
 
-    # TODO(benkraft): return help.
-    raise engine.Misplay("I don't know of a command %s." % args[0])
+    if args[0] in engine.ACTIONS:
+        raise engine.Misplay("To take an action, "
+                             "`/coup action <action> [target]`")
+    else:
+        # TODO(benkraft): return help.
+        raise engine.Misplay("I don't know of a command %s." % args[0])
 
 
 class Command(webapp2.RequestHandler):
+    # TODO(benkraft): GET handler that redirects to the github?
+
+    @ndb.transactional
     def post(self):
         """Endpoint for the slash command."""
         # TODO(benkraft): check the token to prevent abuse?
+        logging.debug(self.request.POST)
         game_id = "%s#%s" % (self.request.POST['team_id'],
                              self.request.POST['channel_id'])
         game = engine.GameState.get_by_id(game_id)
@@ -156,9 +171,9 @@ class Command(webapp2.RequestHandler):
         args = self.request.POST['text'].split()
         try:
             answer = run_command(game, game_id, username, args)
-            if args[0] not in ('deal', 'new', 'restart'):
-                # Don't put the game if we didn't get an error, or if we
-                # started a new game.
+            if args[0] not in ('deal', 'new', 'restart', 'start', 'cancel'):
+                # Don't put the game if we got an error, or if we started a new
+                # game.
                 # TODO(benkraft): do this in a less ad-hoc way.
                 game.put()
         except engine.Misplay as e:
@@ -174,6 +189,7 @@ class Command(webapp2.RequestHandler):
             }
             logging.exception(e)
         self.response.write(json.dumps(answer))
+        self.response.content_type = 'application/json'
 
 
 app = webapp2.WSGIApplication([

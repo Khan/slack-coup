@@ -11,3 +11,6 @@ libraries:
 handlers:
 - url: /.*
   script: coup.app
+
+builtins:
+- remote_api: on
