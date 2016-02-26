@@ -63,9 +63,11 @@ def run_command(game, game_id, username, args):
             'text': game.status_view(),
         }
 
-    # This can take a player, but doesn't need one.
-    # TODO: fake being another user for testing
+    # TODO(benkraft): turn this mode off when testing is done.  (Or don't.)
+    if len(args) >= 3 and args[-2] == 'as':
+        username = args[-1]
     player = game.get_player(username)
+    # This can take a player, but doesn't need one.
     if args[0] in ('view', 'board'):
         return {
             'response_type': 'ephemeral',
