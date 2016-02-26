@@ -55,7 +55,7 @@ def run_command(game, game_id, username, args):
     if not game:
         raise engine.Misplay("There's no game running in this channel.  "
                              "To start a new game, `/coup deal`.")
-    elif args[0] == 'cancel':
+    elif args[0] in ('cancel', 'end'):
         return cancel_game(game)
     elif args[0] in ('status', 'state'):
         return {
@@ -66,6 +66,7 @@ def run_command(game, game_id, username, args):
     # TODO(benkraft): turn this mode off when testing is done.  (Or don't.)
     if len(args) >= 3 and args[-2] == 'as':
         username = args[-1]
+        args = args[:-2]
     player = game.get_player(username)
     # This can take a player, but doesn't need one.
     if args[0] in ('view', 'board'):
@@ -108,7 +109,7 @@ def run_command(game, game_id, username, args):
             raise engine.Misplay("To complete an exchange, "
                                  "`/coup return <card1> <card2>`.")
         return {
-            'response_type': 'ephemeral',
+            'response_type': 'in_channel',
             'text': game.return_cards(player, args[1], args[2]),
         }
     elif args[0] in ('challenge', 'bullshit'):
@@ -173,7 +174,8 @@ class Command(webapp2.RequestHandler):
         args = self.request.POST['text'].split()
         try:
             answer = run_command(game, game_id, username, args)
-            if args[0] not in ('deal', 'new', 'restart', 'start', 'cancel'):
+            if args[0] not in ('deal', 'new', 'restart', 'start', 'cancel',
+                               'end'):
                 # Don't put the game if we got an error, or if we started a new
                 # game.
                 # TODO(benkraft): do this in a less ad-hoc way.

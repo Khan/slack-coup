@@ -34,7 +34,7 @@ ACTION_COSTS = {
 }
 
 ACTION_GAINS = {
-    'steal': 2,
+    # Steal is handled specially since we might only steal 1.
     'tax': 3,
     'income': 1,
     'foreignaid': 2,
@@ -141,7 +141,6 @@ class GameState(ndb.Model):
     # BLOCK_CHALLENGED
     # BLOCK_CHALLENGE_WON
     # BLOCK_CHALLENGE_LOST
-    # BLOCK_CHALLENGE_LOSS_RESOLVED
     # CARDS_TAKEN
     status = ndb.StringProperty()
     challenger = ndb.StringProperty(required=False)
@@ -199,7 +198,7 @@ class GameState(ndb.Model):
                 action_bit, self.blocker, self.blocked_with)
         elif self.status == 'BLOCK_CHALLENGED':
             return "%s, %s blocked with a %s, and %s challenged." % (
-                action_bit, self.blocker, self.blocked_with)
+                action_bit, self.blocker, self.blocked_with, self.challenger)
         elif self.status == 'BLOCK_CHALLENGE_WON':
             return ("%s, %s blocked with a %s, and %s's challenge was "
                     "successful." % (action_bit, self.blocker,
@@ -209,9 +208,6 @@ class GameState(ndb.Model):
                     "%s must flip a card." % (
                         action_bit, self.blocker, self.blocked_with,
                         self.challenger, self.challenger))
-        elif self.status == 'BLOCK_CHALLENGE_LOSS_RESOLVED':
-            return "%s, %s blocked with a %s, and %s's challenge failed." % (
-                action_bit, self.blocker, self.blocked_with, self.challenger)
         elif self.status == 'CARDS_TAKEN':
             return "%s, and has taken cards." % action_bit
         else:
@@ -250,7 +246,7 @@ class GameState(ndb.Model):
             raise Misplay("It's not time for the next person to go yet!")
         elif action not in ACTION_NAMES:
             raise Misplay("I've never heard of that action, try one of these: "
-                          "%s." % ' '.join(ACTIONS))
+                          "%s." % ' '.join(sorted(ACTIONS)))
         action = ACTION_NAMES[action]
         cost = ACTION_COSTS.get(action, 0)
         if player.money < cost:
@@ -263,6 +259,8 @@ class GameState(ndb.Model):
                 raise Misplay("That action needs a target.")
             if target.is_out():
                 raise Misplay("%s is out.")
+            if action == 'steal' and not target.money:
+                raise Misplay("You can't steal from someone with no money.")
 
         # Okay, we're ready to act.  Finish up the last action.
         responses = []
@@ -276,10 +274,19 @@ class GameState(ndb.Model):
         if not self.last_action:
             # If the last action has been flushed, this is a no-op.
             return
+        if self.status == 'BLOCKED':
+            # If the action was blocked, just clear it.
+            text = "%s's %s was blocked." % (self.last_player().username,
+                                             self.last_action)
+            self._clear_action()
+            return text
         if self.last_action in ACTION_GAINS:
             self.last_player().money += ACTION_GAINS[self.last_action]
         if self.last_action == 'steal':
-            self.get_player(self.last_action_target).money -= 2
+            target = self.get_player(self.last_action_target)
+            amount = min(2, target.money)
+            target.money -= amount
+            self.last_player().money += amount
         text = "%s's %s was completed successfully." % (
             self.last_player().username, self.last_action)
         self._clear_action()
@@ -310,6 +317,8 @@ class GameState(ndb.Model):
             target_text = " on %s" % target.username
         else:
             target_text = ""
+        # TODO(benkraft): a less awkward message (e.g. "benkraft stole from
+        # %s")
         responses = ["%s used %s%s!" % (self.last_player().username, action,
                                         target_text)]
         if action in ACTION_CARDS:
@@ -325,7 +334,9 @@ class GameState(ndb.Model):
             # Don't bother saying it completed, that's obvious.
             self._flush_action()
             return
-        elif self.last_action == 'coup':
+        elif self.last_action == 'coup' or (
+                self.last_action == 'assassinate'
+                and self.status == 'BLOCK_CHALLENGE_LOSS_RESOLVED'):
             target = self.get_player(self.last_action_target)
             if target.one_card():
                 return self._flip_card(target, target.live_cards()[0])
@@ -400,10 +411,11 @@ class GameState(ndb.Model):
         challenger = self.get_player(self.challenger)
         card = challenger.find_live_card(card_name)
         if player != challenger:
-            raise Misplay("You haven't been challenged.")
+            # TODO(benkraft): better error message here.
+            raise Misplay("You haven't lost a challenge.")
         elif self.status not in ('CHALLENGE_LOST',
                                'BLOCK_CHALLENGE_LOST'):
-            raise Misplay("You haven't been challenged.")
+            raise Misplay("You haven't lost a challenge.")
         elif not card:
             raise Misplay("You don't have that card.")
 
@@ -418,7 +430,6 @@ class GameState(ndb.Model):
                     [text, self._maybe_autoresolve_action(
                         challenge_complete=True)])
         else:  # self.status == 'BLOCK_CHALLENGE_LOST'
-            self.status = 'BLOCK_CHALLENGE_LOSS_RESOLVED'
             failed_text = "The %s was blocked." % self.last_action
             self._clear_action()
             return _join_messages([text, failed_text])
@@ -453,7 +464,7 @@ class GameState(ndb.Model):
         else:  # self.status == 'BLOCK_CHALLENGED'
             if card.name == self.blocked_with:
                 self.status = 'BLOCK_CHALLENGE_LOST'
-                redeal_text = self._redeal_card(challengee, card)
+                redeal_text = self._redeal_card(challengee, card.name)
                 if challenger.one_card():
                     return _join_messages(
                         [redeal_text, self.lose_challenge(
@@ -490,9 +501,10 @@ class GameState(ndb.Model):
         self.status = 'BLOCKED'
         self.blocker = blocker.username
         self.blocked_with = card_name
-        return "%s has blocked %s's %s with a %s." % (
-            blocker.username, self.last_player().username,
-            self.last_action, card_name)
+        return ("%s has blocked %s's %s with a %s.  If you wish to challenge, "
+                "`/coup challenge`." % (
+                    blocker.username, self.last_player().username,
+                    self.last_action, card_name))
 
     # AMBASSADOR
 
@@ -503,7 +515,7 @@ class GameState(ndb.Model):
         elif self.last_action != 'exchange':
             raise Misplay("You didn't exchange.")
         elif self.status not in ('ACTED', 'CHALLENGE_LOSS_RESOLVED',
-                                 'BLOCK_CHALLENGE_LOSS_RESOLVED'):
+                                 'BLOCK_CHALLENGE_WON'):
             # TODO(benkraft): say why
             raise Misplay("You can't take your cards right now.")
         self.status = 'CARDS_TAKEN'
@@ -543,7 +555,7 @@ class GameState(ndb.Model):
             raise Misplay("You weren't the target of the %s."
                           % self.last_action)
         elif self.status not in ('ACTED', 'CHALLENGE_LOSS_RESOLVED',
-                                 'BLOCK_CHALLENGE_LOSS_RESOLVED'):
+                                 'BLOCK_CHALLENGE_WON'):
             raise Misplay("It's not time to flip a card yet.")
         card = player.find_live_card(card_name)
         if not card:
